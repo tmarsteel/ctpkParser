@@ -409,6 +409,7 @@
     <Compile Include="ObjectTypes\video.cs" />
     <Compile Include="ObjectTypes\virtual_times_difficulty.cs" />
     <Compile Include="ObjectTypes\zone.cs" />
+    <Compile Include="SQLConverter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Attributes.cs" />
   </ItemGroup>
