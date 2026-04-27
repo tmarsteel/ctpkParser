@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using ProtoBuf;
 
 namespace ctpkLib
 {
@@ -38,23 +39,44 @@ namespace ctpkLib
 
         private static void WriteSchemaSQL(TextWriter writer)
         {
+            var sectionTableMap = GetTypedSectionTypes()
+                .ToDictionary(t => t.GetCustomAttribute<Section>().Id, GetTableName);
+
             foreach (var objType in GetTypedSectionTypes().OrderBy(GetTableName))
             {
                 var mapType = GetMapType(objType);
                 if (mapType == null) continue;
 
-                var fields = mapType.GetFields(BindingFlags.Public | BindingFlags.Instance);
+                var fields = GetDataFields(mapType);
+                var sectionId = objType.GetCustomAttribute<Section>().Id;
+                var idField = mapType.GetField("field_1", BindingFlags.Public | BindingFlags.Instance);
 
-                writer.WriteLine($"CREATE TABLE IF NOT EXISTS [{GetTableName(objType)}] (");
-                writer.Write("  [id] INTEGER PRIMARY KEY");
+                var fks = fields
+                    .Select(f => new { field = f, attr = f.GetCustomAttribute<MappedObject>() })
+                    .Where(x => x.attr != null && sectionTableMap.ContainsKey(x.attr.SectionId))
+                    .Select(x => new { x.field, refTable = sectionTableMap[x.attr.SectionId] })
+                    .ToList();
 
-                foreach (var field in fields)
+                writer.WriteLine($"CREATE TABLE IF NOT EXISTS [{GetTableName(objType)}] ( -- 0x{sectionId:X8}");
+
+                string idProto = idField != null ? $" -- proto {GetProtoTag(idField)}" : "";
+                writer.WriteLine($"  [id] INTEGER PRIMARY KEY{(fields.Length > 0 || fks.Count > 0 ? "," : "")}{idProto}");
+
+                for (int i = 0; i < fields.Length; i++)
                 {
-                    writer.WriteLine(",");
-                    writer.Write($"  [{field.Name}] {GetSqlType(field)}");
+                    var field = fields[i];
+                    bool isLast = i == fields.Length - 1 && fks.Count == 0;
+                    int tag = GetProtoTag(field);
+                    string proto = tag >= 0 ? $" -- proto {tag}" : "";
+                    writer.WriteLine($"  [{field.Name}] {GetSqlType(field)}{(isLast ? "" : ",")}{proto}");
                 }
 
-                writer.WriteLine();
+                for (int i = 0; i < fks.Count; i++)
+                {
+                    bool isLast = i == fks.Count - 1;
+                    writer.WriteLine($"  FOREIGN KEY ([{fks[i].field.Name}]) REFERENCES [{fks[i].refTable}]([id]){(isLast ? "" : ",")}");
+                }
+
                 writer.WriteLine(");");
                 writer.WriteLine();
             }
@@ -72,23 +94,37 @@ namespace ctpkLib
                 var mapType = GetMapType(objType);
                 if (mapType == null) continue;
 
-                var fields = mapType.GetFields(BindingFlags.Public | BindingFlags.Instance);
-                if (fields.Length == 0) continue;
+                var idField = mapType.GetField("field_1", BindingFlags.Public | BindingFlags.Instance);
+                var fields = GetDataFields(mapType);
+                if (idField == null && fields.Length == 0) continue;
 
                 string tableName = GetTableName(objType);
-                string colList = "[id], " + string.Join(", ", fields.Select(f => $"[{f.Name}]"));
+                string colList = "[id]" + (fields.Length > 0 ? ", " + string.Join(", ", fields.Select(f => $"[{f.Name}]")) : "");
 
                 foreach (var obj in kvp.Value)
                 {
                     if (obj.Map.GetType() == typeof(ObjMap)) continue;
 
-                    var vals = new List<string> { obj.Id.ToString() };
+                    string idVal = idField != null ? idField.GetValue(obj.Map).ToString() : obj.Id.ToString();
+                    var vals = new List<string> { idVal };
                     foreach (var field in fields)
                         vals.Add(GetSqlValue(lib, obj, field));
 
                     writer.WriteLine($"INSERT INTO [{tableName}] ({colList}) VALUES ({string.Join(", ", vals)});");
                 }
             }
+        }
+
+        private static FieldInfo[] GetDataFields(Type mapType)
+        {
+            return mapType.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                          .Where(f => f.Name != "field_1")
+                          .ToArray();
+        }
+
+        private static int GetProtoTag(FieldInfo field)
+        {
+            return field.GetCustomAttribute<ProtoMemberAttribute>()?.Tag ?? -1;
         }
 
         private static string GetSqlValue(CTPKLib lib, CatalogueObject obj, FieldInfo field)
